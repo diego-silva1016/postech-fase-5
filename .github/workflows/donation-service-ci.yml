@@ -1,0 +1,154 @@
+name: Donation Service CI/CD
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "donation-service/**"
+      - ".github/workflows/donation-service-ci.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "donation-service/**"
+      - ".github/workflows/donation-service-ci.yml"
+
+permissions:
+  contents: read
+  security-events: write
+  pull-requests: read
+
+env:
+  AWS_REGION: us-east-1
+  SERVICE_NAME: donation-service
+  IMAGE_ALIAS: donation-service-image
+  ECR_REPOSITORY: donation-service
+  GITOPS_REPO: diego-silva1016/postech-fase-5-gitops
+
+jobs:
+  sonarcloud:
+    name: SonarCloud Analysis
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: SonarCloud Scan
+        uses: SonarSource/sonarqube-scan-action@v4
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        with:
+          projectBaseDir: donation-service
+
+  trivy-fs:
+    name: Trivy Filesystem Scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run Trivy filesystem scan
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: fs
+          scan-ref: donation-service
+          scanners: vuln,secret,config
+          format: sarif
+          output: trivy-fs-results.sarif
+
+      - name: Upload Trivy SARIF
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: trivy-fs-results.sarif
+          category: trivy-fs-donation-service
+
+  build-scan-push:
+    name: Build, Scan and Push
+    runs-on: ubuntu-latest
+    needs: [sonarcloud, trivy-fs]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build Docker image
+        run: |
+          docker build \
+            -t ${{ env.ECR_REPOSITORY }}:${{ github.sha }} \
+            -t ${{ env.ECR_REPOSITORY }}:latest \
+            donation-service
+
+      - name: Run Trivy image scan
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: image
+          image-ref: ${{ env.ECR_REPOSITORY }}:${{ github.sha }}
+          scanners: vuln
+          severity: CRITICAL,HIGH
+          exit-code: 1
+
+      - name: Push image to ECR
+        run: |
+          docker tag ${{ env.ECR_REPOSITORY }}:${{ github.sha }} \
+            ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
+          docker tag ${{ env.ECR_REPOSITORY }}:latest \
+            ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:latest
+          docker push ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
+          docker push ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:latest
+
+  update-manifest:
+    name: Update GitOps Manifest
+    runs-on: ubuntu-latest
+    needs: build-scan-push
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    steps:
+      - name: Checkout GitOps repo
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.GITOPS_REPO }}
+          token: ${{ secrets.GITOPS_PAT }}
+          path: gitops
+
+      - name: Install kustomize
+        uses: imranismail/setup-kustomize@v2
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Get AWS account ID
+        id: aws
+        run: echo "account_id=$(aws sts get-caller-identity --query Account --output text)" >> $GITHUB_OUTPUT
+
+      - name: Update image tag in kustomization
+        working-directory: gitops/donation-service
+        run: |
+          kustomize edit set image ${{ env.IMAGE_ALIAS }}=${{ steps.aws.outputs.account_id }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
+
+      - name: Commit and push to GitOps repo
+        working-directory: gitops
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add donation-service/kustomization.yaml
+          git diff --staged --quiet || git commit -m "chore(deploy): donation-service ${{ github.sha }}"
+          git push

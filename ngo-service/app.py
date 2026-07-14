@@ -1,13 +1,16 @@
 import os
 import sys
-import psycopg2
-from psycopg2.extras import RealDictCursor
-from psycopg2.pool import SimpleConnectionPool
-from flask import Flask, request, jsonify
-from dotenv import load_dotenv
 import logging
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+from dotenv import load_dotenv
+from flask import Flask, jsonify, request
+from flask_migrate import upgrade
+from sqlalchemy.exc import IntegrityError
+
+from extensions import db, migrate
+import models  # noqa: F401
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 log = logging.getLogger(__name__)
 
 load_dotenv()
@@ -19,56 +22,68 @@ if not DATABASE_URL:
     log.critical("Erro: DATABASE_URL não definida.")
     sys.exit(1)
 
+app.config["SQLALCHEMY_DATABASE_URI"] = DATABASE_URL
+app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
+
+db.init_app(app)
+migrate.init_app(app, db)
+
+
+def run_migrations():
+    with app.app_context():
+        upgrade()
+        log.info("Migrations aplicadas com sucesso.")
+
+
 try:
-    pool = SimpleConnectionPool(1, 10, dsn=DATABASE_URL)
-    log.info("Pool de conexões com o PostgreSQL (ngo-service) inicializado.")
+    run_migrations()
+    log.info("Conexão com PostgreSQL (ngo-service) inicializada.")
 except Exception as e:
-    log.critical(f"Erro ao conectar ao PostgreSQL: {e}")
+    log.critical(f"Erro ao conectar ou migrar o banco: {e}")
     sys.exit(1)
 
-@app.route('/health')
+
+@app.route("/health")
 def health():
     return jsonify({"status": "ok", "service": "ngo-service"})
 
-@app.route('/ngos', methods=['POST'])
+
+@app.route("/ngos", methods=["POST"])
 def create_ngo():
     data = request.get_json()
-    if not data or not all(k in data for k in ('name', 'email', 'cause', 'city')):
+    if not data or not all(k in data for k in ("name", "email", "cause", "city")):
         return jsonify({"error": "Campos obrigatórios ausentes"}), 400
-    
-    conn = pool.getconn()
+
+    ngo = models.Ngo(
+        name=data["name"],
+        email=data["email"],
+        cause=data["cause"],
+        city=data["city"],
+    )
+
     try:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(
-                "INSERT INTO ngos (name, email, cause, city) VALUES (%s, %s, %s, %s) RETURNING *",
-                (data['name'], data['email'], data['cause'], data['city'])
-            )
-            new_ngo = cur.fetchone()
-            conn.commit()
-            return jsonify(new_ngo), 201
-    except psycopg2.IntegrityError:
-        conn.rollback()
+        db.session.add(ngo)
+        db.session.commit()
+        return jsonify(ngo.to_dict()), 201
+    except IntegrityError:
+        db.session.rollback()
         return jsonify({"error": "E-mail já cadastrado"}), 409
     except Exception as e:
-        conn.rollback()
+        db.session.rollback()
         log.error(f"Erro ao criar ONG: {e}")
         return jsonify({"error": "Erro interno"}), 500
-    finally:
-        pool.putconn(conn)
 
-@app.route('/ngos', methods=['GET'])
+
+@app.route("/ngos", methods=["GET"])
 def get_ngos():
-    conn = pool.getconn()
     try:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute("SELECT * FROM ngos ORDER BY id DESC")
-            return jsonify(cur.fetchall()), 200
+        ngos = models.Ngo.query.order_by(models.Ngo.id.desc()).all()
+        return jsonify([ngo.to_dict() for ngo in ngos]), 200
     except Exception as e:
         log.error(f"Erro ao buscar ONGs: {e}")
         return jsonify({"error": "Erro interno"}), 500
-    finally:
-        pool.putconn(conn)
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     port = int(os.getenv("PORT", 8081))
-    app.run(host='0.0.0.0', port=port)
+    app.run(host="0.0.0.0", port=port)
