@@ -31,6 +31,7 @@ jobs:
     concurrency:
       group: sonar-scanner-cli-cache
       cancel-in-progress: false
+      queue: max
     steps:
       - name: Checkout
         uses: actions/checkout@v4
