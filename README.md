@@ -115,11 +115,7 @@ ngo-service/db/init.sql
 
 ### Banco `donation_db`
 
-Execute:
-
-```sql
-donation-service/db/init.sql
-```
+Crie o banco vazio. As migrations são aplicadas automaticamente ao iniciar o `donation-service` (pasta `donation-service/db/migrations/`).
 
 ---
 

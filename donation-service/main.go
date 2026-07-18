@@ -3,12 +3,12 @@ package main
 import (
 	"database/sql"
 	"encoding/json"
-	"fmt"
 	"log"
 	"net/http"
 	"os"
-	"strconv"
 	"time"
+
+	dbmigrations "donation-service/db"
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/session"
@@ -50,6 +50,11 @@ func main() {
 		log.Fatalf("Erro ao conectar ao banco de dados: %v", err)
 	}
 	log.Println("Conectado ao PostgreSQL (donation-service).")
+
+	if err := dbmigrations.RunMigrations(db); err != nil {
+		log.Fatalf("Erro ao aplicar migrations: %v", err)
+	}
+	log.Println("Migrations aplicadas com sucesso (donation-service).")
 
 	var sqsSvc *sqs.SQS
 	queueURL := os.Getenv("AWS_SQS_URL")
