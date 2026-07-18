@@ -3,7 +3,6 @@ import sys
 import logging
 from urllib.parse import quote_plus
 
-import boto3
 from dotenv import load_dotenv
 from flask import Flask, jsonify, request
 from flask_migrate import upgrade
@@ -19,34 +18,14 @@ load_dotenv()
 
 app = Flask(__name__)
 
-AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
-DB_HOST = os.getenv("DB_HOST")
-DB_NAME = os.getenv("DB_NAME")
-DB_USER = os.getenv("DB_USER")
-DB_PORT = os.getenv("DB_PORT", "5432")
-DB_SECRET_NAME = os.getenv("DB_SECRET_NAME", "rds-postgres-password-ngo-db")
-
-
-def get_db_password():
-    client = boto3.client("secretsmanager", region_name=AWS_REGION)
-    response = client.get_secret_value(SecretId=DB_SECRET_NAME)
-    return response["SecretString"]
-
 
 def build_database_url():
-    if not all([DB_HOST, DB_NAME, DB_USER]):
-        log.critical("Erro: DB_HOST, DB_NAME e DB_USER são obrigatórios.")
+    database_url = os.getenv("DATABASE_URL")
+    if database_url:
+        return database_url
+    else:
+        log.critical("Erro: defina DATABASE_URL.")
         sys.exit(1)
-
-    try:
-        password = get_db_password()
-    except Exception as e:
-        log.critical(f"Erro ao buscar senha no Secrets Manager ({DB_SECRET_NAME}): {e}")
-        sys.exit(1)
-
-    encoded_password = quote_plus(password)
-    return f"postgresql://{DB_USER}:{encoded_password}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
-
 
 app.config["SQLALCHEMY_DATABASE_URI"] = build_database_url()
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
